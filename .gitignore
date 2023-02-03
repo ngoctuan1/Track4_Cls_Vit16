@@ -139,8 +139,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-!/checkpoint/
-!/data/
-!/logs/
-!/output/
+/checkpoint/
+/data/
+/logs/
+/output/
 .idea
+Vit-B_16*.npz
+
