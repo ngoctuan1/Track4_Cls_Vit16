@@ -19,8 +19,10 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from utils.data_utils import get_loader
+from utils.data_utils import get_loader, MixCut
 from utils.dist_util import get_world_size
+
+from torch.nn import CrossEntropyLoss
 
 
 logger = logging.getLogger(__name__)
@@ -47,11 +49,15 @@ class AverageMeter(object):
 def simple_accuracy(preds, labels):
     return (preds == labels).mean()
 
+def cal_loss(loss_fn, logits, targets):
+        targets1, targets2, lam = targets[0], targets[1], targets[2]
+        return lam * loss_fn(logits, targets1) + (1 - lam) * loss_fn(logits, targets2)
+
 
 def save_model(args, model):
-    model_to_save = model.module if hasattr(model, 'module') else model
-    model_checkpoint = os.path.join(args.output_dir, "%s_checkpoint.bin" % args.name)
-    torch.save(model_to_save.state_dict(), model_checkpoint)
+    # model_to_save = model.module if hasattr(model, 'module') else model
+    model_checkpoint = os.path.join(args.output_dir, "%s_checkpoint.pt" % args.name)
+    torch.save(model.state_dict(), model_checkpoint)
     logger.info("Saved model checkpoint to [DIR: %s]", args.output_dir)
 
 
@@ -137,7 +143,6 @@ def valid(args, model, writer, test_loader, global_step):
     writer.add_scalar("test/accuracy", scalar_value=accuracy, global_step=global_step)
     return accuracy
 
-
 def train(args, model):
     """ Train the model """
     if args.local_rank in [-1, 0]:
@@ -147,7 +152,7 @@ def train(args, model):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader = get_loader(args)
+    train_loader, val_loader, test_loader = get_loader(args,test = True)
 
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
@@ -182,7 +187,10 @@ def train(args, model):
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     losses = AverageMeter()
+    loss_fct = CrossEntropyLoss()
+    mix_cut = MixCut()
     global_step, best_acc = 0, 0
+    num_classes = 116
     while True:
         model.train()
         epoch_iterator = tqdm(train_loader,
@@ -193,7 +201,17 @@ def train(args, model):
         for step, batch in enumerate(epoch_iterator):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
-            loss = model(x, y)
+            y = y.view(-1)
+
+            # apply mix-cut augmentation
+            if args.augment:
+                mix_x, targets = mix_cut(x, y)
+                logits, feats = model(mix_x)
+                loss = cal_loss(loss_fn = loss_fct,logits=logits, targets=targets)
+            else:
+                logits, feats = model(x)
+                logits = logits.view(-1, num_classes)
+                loss = loss_fct(logits, y)
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -221,7 +239,7 @@ def train(args, model):
                     writer.add_scalar("train/loss", scalar_value=losses.val, global_step=global_step)
                     writer.add_scalar("train/lr", scalar_value=scheduler.get_lr()[0], global_step=global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    accuracy = valid(args, model, writer, test_loader, global_step)
+                    accuracy = valid(args, model, writer, val_loader, global_step)
                     if best_acc < accuracy:
                         save_model(args, model)
                         best_acc = accuracy
@@ -237,7 +255,9 @@ def train(args, model):
         writer.close()
     logger.info("Best Accuracy: \t%f" % best_acc)
     logger.info("End Training!")
-
+    # test set
+    accuracy = valid(args, model, writer, test_loader, global_step)
+    logger.info("TEST Accuracy: %2.5f" % accuracy)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -294,6 +314,8 @@ def main():
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
+
+    parser.add_argument("--augment", action="store_true", help="Use CutMix-MixUp")                             
     args = parser.parse_args()
 
     # Setup CUDA, GPU & distributed training
