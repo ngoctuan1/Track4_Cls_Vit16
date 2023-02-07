@@ -12,93 +12,10 @@ from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, Sequ
 from torchvision.io import read_image
 from PIL import Image
 import numpy as np
+from utils.augment import MSRCP
 
 
-logger = logging.getLogger(__name__)
-
-class Mixup(object):
-    def __init__(self, alpha = 1, device="cpu"):
-        self.alpha = alpha
-        self.device = device
-
-    def __call__(self, images, labels):
-        if self.alpha > 0:
-            lam = np.random.beta(self.alpha, self.alpha)
-        else:
-            lam = 1
-        batch_size = images.size()[0]
-        index = torch.randperm(batch_size).to(self.device)
-
-        mixed_inputs = lam * images + (1-lam)*images[index: ]
-        labels_a, labels_b = labels, labels[index]
-        return mixed_inputs, labels_a, labels_b
-    
-class CutMix(object):
-    def __init__(self, alpha = 1, device = "cpu"):
-        self.alpha = alpha
-        self.device = device
-
-    def __call__(self, images, labels):
-        if self.alpha > 0:
-            lam = np.random.beta(self.alpha, self.alpha)
-        else:
-            lam = 1
-
-        batch_size = images.size()[0]
-        index = torch.randperm(batch_size).to(self.device)
-        mixed_inputs = images.clone()
-
-        r = np.random.rand(1)
-        w = int(images.size()[-2] * np.sqrt(1 - np.power(r, 2)))
-        h = int(images.size()[-1] * np.sqer(1 - np.power(r, 2)))
-        x = np.random.randint(0, images.size()[-2] - w)
-        y = np.random.randint(0, images.size()[-1] - h)
-        
-        mixed_inputs[:, :, x:x+w, y:y+h] = images[index, :, x:x+w, y:y+h]
-        labels_a, labels_b = labels, labels[index]
-        return mixed_inputs, labels_a, labels_b
-
-class MixCut(object):
-    def __init__(self, alpha=1.0, use_cuda=True):
-        self.alpha = alpha
-        self.use_cuda = use_cuda
-
-    def __call__(self, inputs, labels):
-        if self.alpha > 0:
-            lam = np.random.beta(self.alpha, self.alpha)
-        else:
-            lam = 1
-
-        if lam < 0.5:
-            # Mixup
-            batch_size = inputs.size()[0]
-            if self.use_cuda:
-                index = torch.randperm(batch_size).cuda()
-            else:
-                index = torch.randperm(batch_size)
-
-            mixed_inputs = lam * inputs + (1 - lam) * inputs[index, :]
-            labels_a, labels_b = labels, labels[index]
-        else:
-            # Cutmix
-            mixed_inputs = inputs.clone()
-            batch_size = inputs.size()[0]
-            if self.use_cuda:
-                index = torch.randperm(batch_size).cuda()
-            else:
-                index = torch.randperm(batch_size)
-
-            r = np.random.rand(1)
-            w = int(inputs.size()[-2] * np.sqrt(1 - np.power(r, 2)))
-            h = int(inputs.size()[-1] * np.sqrt(1 - np.power(r, 2)))
-            x = np.random.randint(0, inputs.size()[-2] - w)
-            y = np.random.randint(0, inputs.size()[-1] - h)
-
-            mixed_inputs[:, :, x:x+w, y:y+h] = inputs[index, :, x:x+w, y:y+h]
-            labels_a, labels_b = labels, labels[index]
-        
-        return mixed_inputs, (labels_a, labels_b, lam)
-    
+logger = logging.getLogger(__name__) 
 
 class Track4_Dataset(Dataset):
   def __init__(self, df, img_path, transform = None, target_transform = None):
@@ -112,7 +29,7 @@ class Track4_Dataset(Dataset):
 
   def __getitem__(self, index):
     row = self.df.loc[index]
-    img = Image.open(f'{self.img_path}/{row.image_path}')
+    img = cv2.imread(f'{self.img_path}/{row.image_path}')
     label = int(row.class_id) - 1
     if self.transform is not None:
       img = self.transform(img)
@@ -126,8 +43,12 @@ def get_loader(args, test = False):
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
 
+    msrcp = MSRCP()
     transform_train = transforms.Compose([
-        transforms.RandomResizedCrop((args.img_size, args.img_size), scale=(0.05, 1.0)),
+        # transforms.RandomResizedCrop((args.img_size, args.img_size), scale=(0.05, 1.0)),
+        MSRCP(),
+        transforms.ToPILImage(),
+        transforms.Resize((args.img_size, args.img_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         

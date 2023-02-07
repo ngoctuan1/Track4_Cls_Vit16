@@ -37,6 +37,7 @@ def setup(args):
     model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes)
     
     model.load_state_dict(torch.load(args.pretrained_dir))
+    # model.load_from(torch.load(args.pretrained_dir))
     model.to(args.device)
     return args, model
 

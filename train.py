@@ -19,8 +19,9 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from utils.data_utils import get_loader, MixCut
+from utils.data_utils import get_loader
 from utils.dist_util import get_world_size
+from utils.augment import MixCut, CutMix, MSRCP
 
 from torch.nn import CrossEntropyLoss
 
@@ -188,7 +189,9 @@ def train(args, model):
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     losses = AverageMeter()
     loss_fct = CrossEntropyLoss()
-    mix_cut = MixCut()
+    # mix_cut = MixCut(alpha=0.3)
+    cut = CutMix()
+    msrcp = MSRCP()
     global_step, best_acc = 0, 0
     num_classes = 116
     while True:
@@ -205,7 +208,7 @@ def train(args, model):
 
             # apply mix-cut augmentation
             if args.augment:
-                mix_x, targets = mix_cut(x, y)
+                mix_x, targets = cut(x, y)
                 logits, feats = model(mix_x)
                 loss = cal_loss(loss_fn = loss_fct,logits=logits, targets=targets)
             else:
