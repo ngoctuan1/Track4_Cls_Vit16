@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import cv2
+from PIL import Image, ImageEnhance
 
 class Mixup(object):
     def __init__(self, alpha = 1, device="cpu"):
@@ -151,3 +152,161 @@ class MSRCP(object):
             return k_1D
         elif dim==2:
             return k_1D[:,None].dot(k_1D.reshape(1,-1))
+def bgr2gray(img):
+  return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+def gray2bgr(img):
+  return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+def adjust_color(img, alpha=1, beta=None, gamma=0, backend='cv2'):
+    r"""It blends the source image and its gray image:
+
+    .. math::
+        output = img * alpha + gray\_img * beta + gamma
+
+    Args:
+        img (ndarray): The input source image.
+        alpha (int | float): Weight for the source image. Default 1.
+        beta (int | float): Weight for the converted gray image.
+            If None, it's assigned the value (1 - `alpha`).
+        gamma (int | float): Scalar added to each sum.
+            Same as :func:`cv2.addWeighted`. Default 0.
+        backend (str | None): The image processing backend type. Options are
+            `cv2`, `pillow`, `None`. If backend is None, the global
+            ``imread_backend`` specified by ``mmcv.use_backend()`` will be
+            used. Defaults to None.
+
+    Returns:
+        ndarray: Colored image which has the same size and dtype as input.
+    """
+    if backend not in ['cv2', 'pillow']:
+        raise ValueError(f'backend: {backend} is not supported.'
+                         f"Supported backends are 'cv2', 'pillow'")
+
+    if backend == 'pillow':
+        assert img.dtype == np.uint8, 'Pillow backend only support uint8 type'
+        # Image.fromarray defaultly supports RGB, not BGR.
+        pil_image = Image.fromarray(img[..., ::-1], mode='RGB')
+        enhancer = ImageEnhance.Color(pil_image)
+        pil_image = enhancer.enhance(alpha)
+        return np.array(pil_image, dtype=img.dtype)[..., ::-1]
+    else:
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_img = np.tile(gray_img[..., None], [1, 1, 3])
+        if beta is None:
+            beta = 1 - alpha
+        colored_img = cv2.addWeighted(img, alpha, gray_img, beta, gamma)
+        if not colored_img.dtype == np.uint8:
+            # Note when the dtype of `img` is not the default `np.uint8`
+            # (e.g. np.float32), the value in `colored_img` got from cv2
+            # is not guaranteed to be in range [0, 255], so here clip
+            # is needed.
+            colored_img = np.clip(colored_img, 0, 255)
+        return colored_img.astype(img.dtype)
+
+
+def adjust_brightness(img, factor=1., backend='cv2'):
+    """Adjust image brightness.
+
+    This function controls the brightness of an image. An
+    enhancement factor of 0.0 gives a black image.
+    A factor of 1.0 gives the original image. This function
+    blends the source image and the degenerated black image:
+
+    .. math::
+        output = img * factor + degenerated * (1 - factor)
+
+    Args:
+        img (ndarray): Image to be brightened.
+        factor (float): A value controls the enhancement.
+            Factor 1.0 returns the original image, lower
+            factors mean less color (brightness, contrast,
+            etc), and higher values more. Default 1.
+        backend (str | None): The image processing backend type. Options are
+            `cv2`, `pillow`, `None`. If backend is None, the global
+            ``imread_backend`` specified by ``mmcv.use_backend()`` will be
+            used. Defaults to None.
+
+    Returns:
+        ndarray: The brightened image.
+    """
+    if backend is None:
+        backend = imread_backend
+    if backend not in ['cv2', 'pillow']:
+        raise ValueError(f'backend: {backend} is not supported.'
+                         f"Supported backends are 'cv2', 'pillow'")
+
+    if backend == 'pillow':
+        assert img.dtype == np.uint8, 'Pillow backend only support uint8 type'
+        # Image.fromarray defaultly supports RGB, not BGR.
+        pil_image = Image.fromarray(img[..., ::-1], mode='RGB')
+        enhancer = ImageEnhance.Brightness(pil_image)
+        pil_image = enhancer.enhance(factor)
+        return np.array(pil_image, dtype=img.dtype)[..., ::-1]
+    else:
+        degenerated = np.zeros_like(img)
+        # Note manually convert the dtype to np.float32, to
+        # achieve as close results as PIL.ImageEnhance.Brightness.
+        # Set beta=1-factor, and gamma=0
+        brightened_img = cv2.addWeighted(
+            img.astype(np.float32), factor, degenerated.astype(np.float32),
+            1 - factor, 0)
+        brightened_img = np.clip(brightened_img, 0, 255)
+        return brightened_img.astype(img.dtype)
+
+
+def auto_contrast(img, cutoff=0):
+    """Auto adjust image contrast.
+
+    This function maximize (normalize) image contrast by first removing cutoff
+    percent of the lightest and darkest pixels from the histogram and remapping
+    the image so that the darkest pixel becomes black (0), and the lightest
+    becomes white (255).
+
+    Args:
+        img (ndarray): Image to be contrasted. BGR order.
+        cutoff (int | float | tuple): The cutoff percent of the lightest and
+            darkest pixels to be removed. If given as tuple, it shall be
+            (low, high). Otherwise, the single value will be used for both.
+            Defaults to 0.
+
+    Returns:
+        ndarray: The contrasted image.
+    """
+
+    def _auto_contrast_channel(im, c, cutoff):
+        im = im[:, :, c]
+        # Compute the histogram of the image channel.
+        histo = np.histogram(im, 256, (0, 255))[0]
+        # Remove cut-off percent pixels from histo
+        histo_sum = np.cumsum(histo)
+        cut_low = histo_sum[-1] * cutoff[0] // 100
+        cut_high = histo_sum[-1] - histo_sum[-1] * cutoff[1] // 100
+        histo_sum = np.clip(histo_sum, cut_low, cut_high) - cut_low
+        histo = np.concatenate([[histo_sum[0]], np.diff(histo_sum)], 0)
+
+        # Compute mapping
+        low, high = np.nonzero(histo)[0][0], np.nonzero(histo)[0][-1]
+        # If all the values have been cut off, return the origin img
+        if low >= high:
+            return im
+        scale = 255.0 / (high - low)
+        offset = -low * scale
+        lut = np.array(range(256))
+        lut = lut * scale + offset
+        lut = np.clip(lut, 0, 255)
+        return lut[im]
+
+    if isinstance(cutoff, (int, float)):
+        cutoff = (cutoff, cutoff)
+    else:
+        assert isinstance(cutoff, tuple), 'cutoff must be of type int, ' \
+            f'float or tuple, but got {type(cutoff)} instead.'
+    # Auto adjusts contrast for each channel independently and then stacks
+    # the result.
+    s1 = _auto_contrast_channel(img, 0, cutoff)
+    s2 = _auto_contrast_channel(img, 1, cutoff)
+    s3 = _auto_contrast_channel(img, 2, cutoff)
+    contrasted_img = np.stack([s1, s2, s3], axis=-1)
+    return contrasted_img.astype(img.dtype)
+
